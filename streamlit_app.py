@@ -4,13 +4,14 @@ import pandas as pd
 from datetime import datetime, timedelta
 import math
 
-# --- Configuration ---
-OFFICE_LAT = 23.8103  # Apnar Office Latitude ekhane boshan
-OFFICE_LON = 90.4125  # Apnar Office Longitude ekhane boshan
-DISTANCE_LIMIT = 5    # 5 Meter range
+# --- configuration ---
+# Apnar office location (Maps URL theke pawa)
+OFFICE_LAT = 23.8103 
+OFFICE_LON = 90.4125
+DISTANCE_LIMIT = 5  # 5 Meters
 ADMIN_PASSWORD = "Time0308"
 
-# --- Database Setup ---
+# --- Database ---
 conn = sqlite3.connect('attendance.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS attendance 
@@ -18,90 +19,46 @@ c.execute('''CREATE TABLE IF NOT EXISTS attendance
               in_time TIMESTAMP, out_time TIMESTAMP, last_seen TIMESTAMP)''')
 conn.commit()
 
-# --- Distance Calculation ---
 def calculate_distance(lat1, lon1, lat2, lon2):
-    R = 6371000  # Meters
+    R = 6371000 # Meters
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
-# --- UI Setup ---
-st.set_page_config(page_title="Staff Attendance WebApp", layout="wide")
+# --- Admin Panel ---
+st.sidebar.title("Owner Login")
+pw = st.sidebar.text_input("Password", type="password")
 
-menu = ["Staff Tracking", "Owner Dashboard"]
-choice = st.sidebar.selectbox("Menu", menu)
+if pw == ADMIN_PASSWORD:
+    st.title("📊 Attendance Report")
+    month = st.sidebar.date_input("Select Month", value=datetime.now()).strftime('%Y-%m')
+    df = pd.read_sql_query(f"SELECT * FROM attendance WHERE date LIKE '{month}%'", conn)
+    st.dataframe(df, use_container_width=True)
+else:
+    st.title("📍 Staff Attendance Server")
+    st.info("Mobile app background-e data pathachche...")
 
-# --- Staff Tracking Logic ---
-if choice == "Staff Tracking":
-    st.title("📍 Staff Attendance (Automatic)")
-    name = st.text_input("Apnar Nam Likhun:")
+# --- API endpoint logic for Mobile App ---
+# Streamlit-e API handle kora complex, tobe amra session state use korte pari
+def update_attendance(name, lat, lon):
+    now = datetime.now()
+    today = now.strftime('%Y-%m-%d')
+    dist = calculate_distance(OFFICE_LAT, OFFICE_LON, lat, lon)
     
-    # JavaScript use kore location neya (Streamlit limitation bypass korar jonno)
-    location_data = st.query_params.to_dict()
+    c.execute("SELECT * FROM attendance WHERE staff_name=? AND date=?", (name, today))
+    record = c.fetchone()
     
-    if name:
-        # Streamlit e location accurate neyar jonno button dorkar hoy
-        if st.button("Start My Shift / Check My Status"):
-            # Browser current location (Simulated for Streamlit)
-            # Real webApp e HTML5 Geolocation API use kora hoy
-            # Ekhane amra demo logic dichi
-            st.warning("Please ensure your GPS is ON.")
-            
-            # For deployment, Streamlit e client side location neya ektu complex.
-            # Ekhane amra ekta simplified logic rakhchi:
-            now = datetime.now()
-            today = now.strftime('%Y-%m-%d')
-            
-            # Database check
-            c.execute("SELECT * FROM attendance WHERE staff_name=? AND date=?", (name, today))
-            record = c.fetchone()
-            
-            if not record:
-                # Prothom bar office e dhukle (In Time)
-                c.execute("INSERT INTO attendance (staff_name, date, in_time, last_seen) VALUES (?, ?, ?, ?)",
-                          (name, today, now, now))
-                conn.commit()
-                st.success(f"Swagotom {name}! Apnar In-Time record kora hoyeche: {now.strftime('%H:%M:%S')}")
-            else:
-                # Out time logic: 1 hour gap check
-                last_seen = datetime.strptime(record[5], '%Y-%m-%d %H:%M:%S.%f')
-                if (now - last_seen) > timedelta(hours=1):
-                    c.execute("UPDATE attendance SET out_time=? WHERE staff_name=? AND date=?", 
-                              (last_seen, name, today))
-                    conn.commit()
-                    st.error(f"Apnar Out-Time record kora hoyeche: {last_seen.strftime('%H:%M:%S')}")
-                else:
-                    # Update last seen
-                    c.execute("UPDATE attendance SET last_seen=? WHERE staff_name=? AND date=?", 
-                              (now, name, today))
-                    conn.commit()
-                    st.info("Tracking active... Apnar location update kora hoyeche.")
-
-# --- Owner Dashboard Logic ---
-elif choice == "Owner Dashboard":
-    st.title("🔑 Owner Panel")
-    password = st.text_input("Admin Password Din:", type="password")
-    
-    if password == ADMIN_PASSWORD:
-        st.success("Login Successful!")
-        
-        # Monthly Filter
-        month = st.date_input("Mas Select Korun:", value=datetime.now())
-        month_str = month.strftime('%Y-%m')
-        
-        query = f"SELECT staff_name, date, in_time, out_time FROM attendance WHERE date LIKE '{month_str}%'"
-        df = pd.read_sql_query(query, conn)
-        
-        if not df.empty:
-            st.write(f"### {month_str} er Attendance Report")
-            st.dataframe(df, use_container_width=True)
-            
-            # Download CSV option
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Report as CSV", data=csv, file_name=f"Report_{month_str}.csv")
+    if dist <= DISTANCE_LIMIT:
+        if not record:
+            c.execute("INSERT INTO attendance (staff_name, date, in_time, last_seen) VALUES (?, ?, ?, ?)",
+                      (name, today, now, now))
         else:
-            st.info("Ei mashe kono data nei.")
-    elif password:
-        st.error("Vul Password! Abar chesta korun.")
+            c.execute("UPDATE attendance SET last_seen=? WHERE staff_name=? AND date=?", (now, name, today))
+    else:
+        if record and record[4] is None: # out_time empty thakle
+            last_seen = datetime.strptime(record[5], '%Y-%m-%d %H:%M:%S.%f')
+            if (now - last_seen) > timedelta(hours=1):
+                c.execute("UPDATE attendance SET out_time=? WHERE staff_name=? AND date=?", (last_seen, name, today))
+    conn.commit()
